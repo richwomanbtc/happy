@@ -19,7 +19,7 @@ import type { PersistedSession } from '@/persistence';
 
 import { cleanupDaemonState, isDaemonRunningCurrentlyInstalledHappyVersion, stopDaemon } from './controlClient';
 import { startDaemonControlServer } from './controlServer';
-import { statSync } from 'fs';
+import { statSync, existsSync, readFileSync } from 'fs';
 import { join } from 'path';
 import { projectPath } from '@/projectPath';
 import { getTmuxUtilities, isTmuxAvailable, parseTmuxSessionIdentifier, formatTmuxSessionIdentifier } from '@/utils/tmux';
@@ -37,6 +37,34 @@ import {
 /** Shell-escape a string for safe interpolation into tmux commands. */
 function shellescape(s: string): string {
     return "'" + s.replace(/'/g, "'\\''") + "'";
+}
+
+/**
+ * Load KEY=VALUE pairs from the spawn directory's .env so daemon-spawned
+ * sessions pick up per-project settings (API keys, model overrides) that a
+ * terminal-started session would inherit from the shell. Precedence:
+ * explicit environmentVariables > .env > authEnv(token) > daemon process.env.
+ */
+function loadProjectDotEnv(dir: string): Record<string, string> {
+  try {
+    const envPath = join(dir, '.env');
+    if (!existsSync(envPath)) return {};
+    const out: Record<string, string> = {};
+    for (const line of readFileSync(envPath, 'utf8').split(/\r?\n/)) {
+      const m = line.match(/^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*?)\s*$/);
+      if (!m) continue;
+      let value = m[2];
+      if ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"))) {
+        value = value.slice(1, -1);
+      }
+      out[m[1]] = value;
+    }
+    logger.debug(`[DAEMON RUN] Loaded ${Object.keys(out).length} vars from ${envPath}`);
+    return out;
+  } catch (error) {
+    logger.debug(`[DAEMON RUN] Failed to load .env from ${dir}: ${error}`);
+    return {};
+  }
 }
 
 function appendDaemonSpawnModeArgs(args: string[], options: SpawnSessionOptions, agent: string): void {
@@ -349,6 +377,7 @@ export async function startDaemon(): Promise<void> {
 
         let extraEnv: Record<string, string> = {
           ...authEnv,
+          ...loadProjectDotEnv(directory),
           ...sanitizeSessionEnvironment(options.environmentVariables ?? {}),
         };
         if (options.parentSessionId) {
@@ -747,6 +776,7 @@ export async function startDaemon(): Promise<void> {
           args: launch.args,
           cwd: launch.cwd,
           env: buildSessionChildEnvironment(ambientEnvironment, {
+            ...loadProjectDotEnv(launch.cwd),
             HAPPY_RECONNECT_SESSION_ID: happySessionId,
             HAPPY_RECONNECT_ENCRYPTION_KEY: encodeBase64(tracked.encryption.encryptionKey),
             HAPPY_RECONNECT_ENCRYPTION_VARIANT: tracked.encryption.encryptionVariant,
