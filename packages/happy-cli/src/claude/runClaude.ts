@@ -57,7 +57,11 @@ export interface StartOptions {
     jsRuntime?: JsRuntime
 }
 
-const DEFAULT_CLAUDE_PERMISSION_MODE: PermissionMode = 'yolo';
+// NOTE(fork): upstream defaults to 'yolo', which silently runs every session
+// with --dangerously-skip-permissions unless a mode was explicitly passed
+// (#1514). Default to Claude's own ask-first mode; yolo remains available via
+// --yolo / --permission-mode yolo / explicit app selection.
+const DEFAULT_CLAUDE_PERMISSION_MODE: PermissionMode = 'default';
 const DEFAULT_CLAUDE_MODEL = 'opus';
 const DEFAULT_CLAUDE_EFFORT: 'low' | 'medium' | 'high' | 'xhigh' | 'max' = 'medium';
 type ClaudeGoalCommand = NonNullable<ReturnType<typeof parseClaudeGoalActionParams>>;
