@@ -60,6 +60,17 @@ export async function runGemini(opts: {
   credentials: Credentials;
   startedBy?: 'daemon' | 'terminal';
 }): Promise<void> {
+  // Same as the codex flow: no global crash handlers exist here, so log
+  // uncaught errors synchronously before dying — daemon-spawned sessions
+  // discard stderr, making silent crashes undiagnosable.
+  const crashHandler = (error: unknown) => {
+    logger.debug('[gemini] Fatal uncaught error:', error);
+    console.error('[happy] Fatal error:', error);
+    process.exit(1);
+  };
+  process.on('uncaughtException', crashHandler);
+  process.on('unhandledRejection', crashHandler);
+
   //
   // Define session
   //

@@ -96,6 +96,19 @@ export async function runCodex(opts: {
     model?: string;
     effort?: ReasoningEffort;
 }): Promise<void> {
+    // There are no global crash handlers in the codex flow, so an unexpected
+    // error (e.g. an unhandled 4xx from machine registration) would kill the
+    // process with nothing in the log — daemon-spawned sessions discard
+    // stderr, making the failure undiagnosable. Log synchronously before
+    // dying; exit code matches Node's default crash behavior.
+    const crashHandler = (error: unknown) => {
+        logger.debug('[codex] Fatal uncaught error:', error);
+        console.error('[happy] Fatal error:', error);
+        process.exit(1);
+    };
+    process.on('uncaughtException', crashHandler);
+    process.on('unhandledRejection', crashHandler);
+
     // Early check: ensure Codex CLI is installed before proceeding
     try {
         execSync('codex --version', { encoding: 'utf8', stdio: 'pipe', windowsHide: true });

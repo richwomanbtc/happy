@@ -147,6 +147,8 @@ Conversation history is preserved on the server, but in-flight tool calls are in
       await handleCodexCommand(args.slice(1));
       // Do not force exit here; allow instrumentation to show lingering handles
     } catch (error) {
+      // Also log to file — daemon-spawned sessions discard stderr.
+      logger.debug('[START] codex command failed:', error)
       console.error(chalk.red('Error:'), error instanceof Error ? error.message : 'Unknown error')
       if (process.env.DEBUG) {
         console.error(error)
@@ -356,6 +358,8 @@ Conversation history is preserved on the server, but in-flight tool calls are in
 
       await runGemini({credentials, startedBy});
     } catch (error) {
+      // Also log to file — daemon-spawned sessions discard stderr.
+      logger.debug('[START] gemini command failed:', error)
       console.error(chalk.red('Error:'), error instanceof Error ? error.message : 'Unknown error')
       if (process.env.DEBUG) {
         console.error(error)
@@ -787,6 +791,9 @@ ${chalk.bold.cyan('Claude Code Options (from `claude --help`):')}
     try {
       await runClaude(credentials, options);
     } catch (error) {
+      // Also log to file: daemon-spawned sessions discard stderr, so console
+      // output alone makes startup failures undiagnosable (silent exit 1).
+      logger.debug('[START] runClaude failed:', error)
       console.error(chalk.red('Error:'), error instanceof Error ? error.message : 'Unknown error')
       if (process.env.DEBUG) {
         console.error(error)

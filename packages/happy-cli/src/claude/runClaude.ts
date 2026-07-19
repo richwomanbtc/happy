@@ -75,6 +75,20 @@ type PendingClaudeGoalAction = {
 export async function runClaude(credentials: Credentials, options: StartOptions = {}): Promise<void> {
     logger.debug(`[CLAUDE] ===== CLAUDE MODE STARTING =====`);
     logger.debug(`[CLAUDE] This is the Claude agent, NOT Gemini`);
+
+    // Until the session is established the full crash handlers below aren't
+    // registered yet, so a startup-phase error (e.g. an unexpected 4xx from
+    // machine registration) would kill the process with nothing in the log —
+    // daemon-spawned sessions discard stderr, making the failure undiagnosable.
+    // Log synchronously before dying; replaced by the archive-aware handlers
+    // once the session exists.
+    const earlyCrashHandler = (error: unknown) => {
+        logger.debug('[START] Fatal error before session was established:', error);
+        console.error('[happy] Fatal startup error:', error);
+        process.exit(1);
+    };
+    process.on('uncaughtException', earlyCrashHandler);
+    process.on('unhandledRejection', earlyCrashHandler);
     
     const workingDirectory = process.cwd();
     const sessionTag = randomUUID();
@@ -911,6 +925,11 @@ export async function runClaude(credentials: Credentials, options: StartOptions 
     // "archive forever".
     process.on('SIGTERM', () => { void cleanup({ archive: false }); });
     process.on('SIGINT', () => { void cleanup({ archive: false }); });
+
+    // Session is established — hand over from the early log-and-exit handler
+    // to the archive-aware crash handlers.
+    process.off('uncaughtException', earlyCrashHandler);
+    process.off('unhandledRejection', earlyCrashHandler);
 
     // Crashes archive on the way out so the session shows up correctly
     // in the app rather than masquerading as live.
