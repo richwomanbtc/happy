@@ -7,6 +7,7 @@
 
 import psList from 'ps-list';
 import spawn from 'cross-spawn';
+import { readDaemonState } from '@/persistence';
 
 /**
  * Find all Happy CLI processes (including current process)
@@ -79,14 +80,49 @@ export async function findRunawayHappyProcesses(): Promise<Array<{ pid: number, 
 }
 
 /**
- * Kill all runaway Happy CLI processes
+ * PIDs that `doctor clean` must spare: a healthy daemon and the live sessions
+ * it tracks. Health is proven by a successful POST /list on the daemon's
+ * control port — a wedged daemon (state file present but not responding)
+ * protects nothing, so it remains killable.
  */
-export async function killRunawayHappyProcesses(): Promise<{ killed: number, errors: Array<{ pid: number, error: string }> }> {
+export async function findProtectedPids(): Promise<Set<number>> {
+  const protectedPids = new Set<number>();
+  try {
+    const state = await readDaemonState();
+    if (!state?.pid || !state.httpPort) return protectedPids;
+    process.kill(state.pid, 0); // throws if the daemon pid is dead
+    const response = await fetch(`http://127.0.0.1:${state.httpPort}/list`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: '{}',
+      signal: AbortSignal.timeout(2000),
+    });
+    if (!response.ok) return protectedPids;
+    const result = await response.json() as { children?: Array<{ pid?: number }> };
+    protectedPids.add(state.pid);
+    for (const child of result.children || []) {
+      if (typeof child.pid === 'number') protectedPids.add(child.pid);
+    }
+  } catch {
+    // No daemon state / dead pid / unreachable control server — protect nothing.
+  }
+  return protectedPids;
+}
+
+/**
+ * Kill runaway Happy CLI processes. By default a healthy daemon and its
+ * tracked live sessions are spared; pass `all: true` to kill everything
+ * (previous behavior).
+ */
+export async function killRunawayHappyProcesses(options: { all?: boolean } = {}): Promise<{ killed: number, spared: number, errors: Array<{ pid: number, error: string }> }> {
   const runawayProcesses = await findRunawayHappyProcesses();
+  const protectedPids = options.all ? new Set<number>() : await findProtectedPids();
+  const targets = runawayProcesses.filter(p => !protectedPids.has(p.pid));
+  const spared = runawayProcesses.length - targets.length;
   const errors: Array<{ pid: number, error: string }> = [];
   let killed = 0;
-  
-  for (const { pid, command } of runawayProcesses) {
+
+  for (const { pid, command } of targets) {
     try {
       console.log(`Killing runaway process PID ${pid}: ${command}`);
       
@@ -120,5 +156,5 @@ export async function killRunawayHappyProcesses(): Promise<{ killed: number, err
     }
   }
 
-  return { killed, errors };
+  return { killed, spared, errors };
 }

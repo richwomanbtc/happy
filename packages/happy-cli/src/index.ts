@@ -57,18 +57,23 @@ import { sanitizeSessionEnvironment } from './daemon/sessionEnvironment'
     if (args[1] === 'clean') {
       if (args.slice(2).some(a => a === '--help' || a === '-h')) {
         console.log(`
-${chalk.bold('happy doctor clean')} - Kill all happy-related processes (daemon + sessions)
+${chalk.bold('happy doctor clean')} - Kill orphaned happy processes
 
 ${chalk.bold('Usage:')}
-  happy doctor clean
+  happy doctor clean          Kill orphans, sparing a healthy daemon and its live sessions
+  happy doctor clean --all    Kill everything (daemon + all sessions)
 
-${chalk.bold('Warning:')} This is destructive — it terminates the daemon and every running session.
+${chalk.bold('Warning:')} --all is destructive — it terminates the daemon and every running session.
 Conversation history is preserved on the server, but in-flight tool calls are interrupted.
 `)
         process.exit(0)
       }
-      const result = await killRunawayHappyProcesses()
+      const all = args.slice(2).includes('--all')
+      const result = await killRunawayHappyProcesses({ all })
       console.log(`Cleaned up ${result.killed} runaway processes`)
+      if (result.spared > 0) {
+        console.log(`Spared ${result.spared} live processes (healthy daemon + tracked sessions). Use --all to kill everything.`)
+      }
       if (result.errors.length > 0) {
         console.log('Errors:', result.errors)
       }
