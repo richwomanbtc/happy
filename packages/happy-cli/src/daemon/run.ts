@@ -14,10 +14,11 @@ import { startCaffeinate, stopCaffeinate } from '@/utils/caffeinate';
 import packageJson from '../../package.json';
 import { getEnvironmentInfo } from '@/ui/doctor';
 import { spawnHappyCLI } from '@/utils/spawnHappyCLI';
-import { writeDaemonState, DaemonLocallyPersistedState, readDaemonState, acquireDaemonLock, releaseDaemonLock, readPersistedSessions, persistSession } from '@/persistence';
+import { writeDaemonState, DaemonLocallyPersistedState, readDaemonState, acquireDaemonLock, releaseDaemonLock, readPersistedSessions, persistSession, readPersistedTrackedChildren, writePersistedTrackedChildren } from '@/persistence';
 import type { PersistedSession } from '@/persistence';
 
 import { cleanupDaemonState, isDaemonRunningCurrentlyInstalledHappyVersion, stopDaemon } from './controlClient';
+import { findAllHappyProcesses } from './doctor';
 import { startDaemonControlServer } from './controlServer';
 import { statSync, existsSync, readFileSync } from 'fs';
 import { join } from 'path';
@@ -245,6 +246,46 @@ export async function startDaemon(): Promise<void> {
     // Helper functions
     const getCurrentChildren = () => Array.from(pidToTrackedSession.values());
 
+    const persistTrackedChildren = () => {
+      writePersistedTrackedChildren(getCurrentChildren().map(s => ({
+        pid: s.pid,
+        startedBy: s.startedBy,
+        happySessionId: s.happySessionId,
+        tmuxSessionId: s.tmuxSessionId,
+      })));
+    };
+
+    // Re-adopt children spawned by a previous daemon instance. Without this,
+    // a daemon restart (upgrade, crash, `daemon stop`+`start`) forgets every
+    // live session: they vanish from /list, can't be stopped from the app, and
+    // pile up as orphan processes. Only PIDs that are both still alive AND
+    // currently running a happy CLI are re-adopted, which guards against OS
+    // PID reuse handing us an unrelated process.
+    const previousChildren = readPersistedTrackedChildren();
+    if (previousChildren.length > 0) {
+      const happyPids = new Set((await findAllHappyProcesses()).map(p => p.pid));
+      for (const child of previousChildren) {
+        if (!happyPids.has(child.pid)) continue;
+        const persistedSession = child.happySessionId ? persisted[child.happySessionId] : undefined;
+        pidToTrackedSession.set(child.pid, {
+          startedBy: child.startedBy,
+          happySessionId: child.happySessionId,
+          happySessionMetadataFromLocalWebhook: persistedSession?.metadata,
+          encryption: persistedSession ? {
+            encryptionKey: decodeBase64(persistedSession.encryptionKey),
+            encryptionVariant: persistedSession.encryptionVariant,
+            seq: persistedSession.seq,
+            metadataVersion: persistedSession.metadataVersion,
+            agentStateVersion: persistedSession.agentStateVersion,
+          } : undefined,
+          pid: child.pid,
+          tmuxSessionId: child.tmuxSessionId,
+        });
+      }
+      logger.debug(`[DAEMON RUN] Re-adopted ${pidToTrackedSession.size} of ${previousChildren.length} previously tracked children`);
+    }
+    persistTrackedChildren();
+
     // Handle webhook from happy session reporting itself
     const onHappySessionWebhook = (sessionId: string, sessionMetadata: Metadata, encryption?: SessionEncryptionData) => {
       logger.debugLargeJson(`[DAEMON RUN] Session reported`, sessionMetadata);
@@ -279,6 +320,7 @@ export async function startDaemon(): Promise<void> {
         existingSession.happySessionId = sessionId;
         existingSession.happySessionMetadataFromLocalWebhook = sessionMetadata;
         existingSession.encryption = encryption;
+        persistTrackedChildren();
         logger.debug(`[DAEMON RUN] Updated daemon-spawned session ${sessionId} with metadata`);
 
         // Resolve any awaiter for this PID
@@ -298,6 +340,7 @@ export async function startDaemon(): Promise<void> {
           pid
         };
         pidToTrackedSession.set(pid, trackedSession);
+        persistTrackedChildren();
         logger.debug(`[DAEMON RUN] Registered externally-started session ${sessionId}`);
       }
     };
@@ -525,6 +568,7 @@ export async function startDaemon(): Promise<void> {
 
             // Add to tracking map so webhook can find it later
             pidToTrackedSession.set(tmuxResult.pid, trackedSession);
+            persistTrackedChildren();
 
             // Wait for webhook to populate session with happySessionId (exact same as regular flow)
             logger.debug(`[DAEMON RUN] Waiting for session webhook for PID ${tmuxResult.pid} (tmux)`);
@@ -666,6 +710,7 @@ export async function startDaemon(): Promise<void> {
       };
 
       pidToTrackedSession.set(happyProcess.pid, trackedSession);
+      persistTrackedChildren();
 
       happyProcess.on('exit', (code, signal) => {
         logger.debug(`[DAEMON RUN] Child PID ${happyProcess.pid} exited with code ${code}, signal ${signal}`);
@@ -822,6 +867,7 @@ export async function startDaemon(): Promise<void> {
           }
 
           pidToTrackedSession.delete(pid);
+          persistTrackedChildren();
           logger.debug(`[DAEMON RUN] Removed session ${sessionId} from tracking`);
           return true;
         }
@@ -841,6 +887,7 @@ export async function startDaemon(): Promise<void> {
         logger.debug(`[DAEMON RUN] Removing exited process PID ${pid} from tracking`);
       }
       pidToTrackedSession.delete(pid);
+      persistTrackedChildren();
     };
 
     // Start control server
@@ -935,9 +982,10 @@ export async function startDaemon(): Promise<void> {
           // Check if process is still alive (signal 0 doesn't kill, just checks)
           process.kill(pid, 0);
         } catch (error) {
-          // Process is dead, remove from tracking
+          // Process is dead — route through onChildExited so resume data is
+          // preserved and the persisted children file stays in sync.
           logger.debug(`[DAEMON RUN] Removing stale session with PID ${pid} (process no longer exists)`);
-          pidToTrackedSession.delete(pid);
+          onChildExited(pid);
         }
       }
 

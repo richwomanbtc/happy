@@ -461,3 +461,37 @@ export function persistSession(sessionId: string, session: PersistedSession): vo
     logger.debug(`[PERSISTENCE] Failed to persist session ${sessionId}:`, error);
   }
 }
+
+// ─── Daemon child-process tracking (survives daemon restarts) ───
+
+export type PersistedTrackedChild = {
+  pid: number;
+  startedBy: string;
+  happySessionId?: string;
+  tmuxSessionId?: string;
+};
+
+type TrackedChildrenFile = {
+  children: PersistedTrackedChild[];
+};
+
+export function readPersistedTrackedChildren(): PersistedTrackedChild[] {
+  try {
+    if (!existsSync(configuration.trackedChildrenFile)) return [];
+    const data = JSON.parse(readFileSync(configuration.trackedChildrenFile, 'utf-8')) as TrackedChildrenFile;
+    if (!Array.isArray(data?.children)) return [];
+    return data.children.filter(c => typeof c?.pid === 'number');
+  } catch {
+    return [];
+  }
+}
+
+export function writePersistedTrackedChildren(children: PersistedTrackedChild[]): void {
+  try {
+    const tmpFile = configuration.trackedChildrenFile + '.tmp';
+    writeFileSync(tmpFile, JSON.stringify({ children }, null, 2), 'utf-8');
+    renameSync(tmpFile, configuration.trackedChildrenFile);
+  } catch (error) {
+    logger.debug('[PERSISTENCE] Failed to persist tracked children:', error);
+  }
+}
